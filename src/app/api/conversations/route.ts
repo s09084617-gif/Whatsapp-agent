@@ -1,32 +1,32 @@
 import { supabase } from "@/lib/supabase";
 
 export async function GET() {
-  // Get all conversations with their latest message
   const { data: conversations, error } = await supabase
     .from("conversations")
     .select("*")
     .order("updated_at", { ascending: false });
 
-  if (error) {
-    return Response.json({ error: error.message }, { status: 500 });
+  if (error || !conversations?.length) {
+    return Response.json([]);
   }
 
-  // Fetch last message for each conversation
-  const withLastMessage = await Promise.all(
-    (conversations || []).map(async (convo) => {
-      const { data: messages } = await supabase
-        .from("messages")
-        .select("content, role, created_at")
-        .eq("conversation_id", convo.id)
-        .order("created_at", { ascending: false })
-        .limit(1);
+  const ids = conversations.map((c) => c.id);
 
-      return {
-        ...convo,
-        last_message: messages?.[0]?.content || null,
-      };
-    })
+  // Single query for all last messages instead of N+1
+  const { data: msgs } = await supabase
+    .from("messages")
+    .select("conversation_id, content")
+    .in("conversation_id", ids)
+    .order("created_at", { ascending: false });
+
+  const lastMsgMap: Record<string, string> = {};
+  for (const m of msgs || []) {
+    if (!lastMsgMap[m.conversation_id]) {
+      lastMsgMap[m.conversation_id] = m.content;
+    }
+  }
+
+  return Response.json(
+    conversations.map((c) => ({ ...c, last_message: lastMsgMap[c.id] ?? null }))
   );
-
-  return Response.json(withLastMessage);
 }

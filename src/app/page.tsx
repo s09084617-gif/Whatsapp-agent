@@ -17,20 +17,36 @@ export default function Dashboard() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [loadingConvos, setLoadingConvos] = useState(true);
+  const [loadingMsgs, setLoadingMsgs] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selected = conversations.find((c) => c.id === selectedId);
 
+  function showError(msg: string) {
+    setError(msg);
+    if (errorTimer.current) clearTimeout(errorTimer.current);
+    errorTimer.current = setTimeout(() => setError(null), 4000);
+  }
+
   const fetchConversations = useCallback(async () => {
     const res = await fetch("/api/conversations");
+    if (!res.ok) return;
     const data = await res.json();
     setConversations(data);
+    setLoadingConvos(false);
   }, []);
 
   const fetchMessages = useCallback(async (convoId: string) => {
+    setLoadingMsgs(true);
     const res = await fetch(`/api/conversations/${convoId}/messages`);
-    const data = await res.json();
-    setMessages(data);
+    if (res.ok) {
+      const data = await res.json();
+      setMessages(data);
+    }
+    setLoadingMsgs(false);
   }, []);
 
   useEffect(() => {
@@ -38,7 +54,10 @@ export default function Dashboard() {
   }, [fetchConversations]);
 
   useEffect(() => {
-    if (selectedId) fetchMessages(selectedId);
+    if (selectedId) {
+      setMessages([]);
+      fetchMessages(selectedId);
+    }
   }, [selectedId, fetchMessages]);
 
   useEffect(() => {
@@ -70,35 +89,64 @@ export default function Dashboard() {
       )
       .subscribe();
 
-    return () => {
-      supabase?.removeChannel(channel);
-    };
+    return () => { supabase?.removeChannel(channel); };
   }, [selectedId, fetchConversations, supabase]);
 
   async function toggleMode() {
     if (!selected) return;
     const newMode = selected.mode === "agent" ? "human" : "agent";
-    await fetch(`/api/conversations/${selected.id}`, {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === selected.id ? { ...c, mode: newMode } : c))
+    );
+    const res = await fetch(`/api/conversations/${selected.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: newMode }),
     });
-    setConversations((prev) =>
-      prev.map((c) => (c.id === selected.id ? { ...c, mode: newMode } : c))
-    );
+    if (!res.ok) {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === selected.id ? { ...c, mode: selected.mode } : c))
+      );
+      showError("Failed to switch mode");
+    }
   }
 
   async function handleSend() {
     if (!input.trim() || !selectedId || sending) return;
+    const text = input.trim();
+    setInput("");
     setSending(true);
-    await fetch(`/api/conversations/${selectedId}/send`, {
+
+    // Optimistic update
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMsg: Message = {
+      id: tempId,
+      conversation_id: selectedId,
+      role: "assistant",
+      content: text,
+      whatsapp_msg_id: null,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+
+    const res = await fetch(`/api/conversations/${selectedId}/send`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: input.trim() }),
+      body: JSON.stringify({ message: text }),
     });
-    setInput("");
+
+    if (!res.ok) {
+      // Roll back optimistic message
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setInput(text);
+      const data = await res.json().catch(() => ({}));
+      showError(data.error ?? "Failed to send message");
+    } else {
+      // Replace temp with real message from server
+      const real = await res.json();
+      setMessages((prev) => prev.map((m) => (m.id === tempId ? real : m)));
+    }
     setSending(false);
-    fetchMessages(selectedId);
   }
 
   function formatTime(dateStr: string) {
@@ -112,9 +160,15 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-screen bg-[#0f0f0f] font-sans">
+      {/* Error toast */}
+      {error && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-red-500/90 text-white text-xs px-4 py-2 rounded-lg shadow-lg backdrop-blur">
+          {error}
+        </div>
+      )}
+
       {/* Sidebar */}
       <div className="w-[320px] flex flex-col border-r border-white/[0.06]" style={{ background: "#141414" }}>
-        {/* Sidebar Header */}
         <div className="px-5 py-4 border-b border-white/[0.06]">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-emerald-500 flex items-center justify-center flex-shrink-0">
@@ -124,14 +178,20 @@ export default function Dashboard() {
             </div>
             <div>
               <h1 className="text-sm font-semibold text-white leading-tight">WhatsApp AI Agent</h1>
-              <p className="text-xs text-white/40 leading-tight mt-0.5">{conversations.length} conversation{conversations.length !== 1 ? "s" : ""}</p>
+              <p className="text-xs text-white/40 leading-tight mt-0.5">
+                {loadingConvos ? "Loading…" : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
+              </p>
             </div>
           </div>
         </div>
 
-        {/* Conversation List */}
         <div className="flex-1 overflow-y-auto">
-          {conversations.length === 0 && (
+          {loadingConvos ? (
+            <div className="flex flex-col items-center justify-center h-48 gap-2">
+              <div className="w-5 h-5 border-2 border-white/10 border-t-emerald-500 rounded-full animate-spin" />
+              <p className="text-xs text-white/30">Loading conversations…</p>
+            </div>
+          ) : conversations.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 gap-2">
               <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -139,56 +199,57 @@ export default function Dashboard() {
                 </svg>
               </div>
               <p className="text-xs text-white/30">No conversations yet</p>
+              <p className="text-[10px] text-white/20 text-center px-6">Messages from WhatsApp will appear here</p>
             </div>
+          ) : (
+            conversations.map((convo) => {
+              const isSelected = selectedId === convo.id;
+              return (
+                <button
+                  key={convo.id}
+                  onClick={() => setSelectedId(convo.id)}
+                  className={`w-full text-left px-4 py-3.5 transition-all duration-150 relative group ${
+                    isSelected ? "bg-white/[0.07]" : "hover:bg-white/[0.04]"
+                  }`}
+                >
+                  {isSelected && (
+                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-8 bg-emerald-500 rounded-r" />
+                  )}
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-600 to-emerald-800 flex items-center justify-center flex-shrink-0 text-white text-xs font-semibold">
+                      {getInitials(convo.name, convo.phone)}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-medium text-white/90 truncate">
+                          {convo.name || convo.phone}
+                        </span>
+                        <span className="text-[10px] text-white/30 flex-shrink-0">
+                          {formatTime(convo.updated_at)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 mt-0.5">
+                        {convo.last_message ? (
+                          <p className="text-xs text-white/40 truncate">{convo.last_message}</p>
+                        ) : (
+                          <span />
+                        )}
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 uppercase tracking-wide ${
+                            convo.mode === "agent"
+                              ? "bg-emerald-500/20 text-emerald-400"
+                              : "bg-amber-500/20 text-amber-400"
+                          }`}
+                        >
+                          {convo.mode === "agent" ? "AI" : "You"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })
           )}
-          {conversations.map((convo) => {
-            const isSelected = selectedId === convo.id;
-            return (
-              <button
-                key={convo.id}
-                onClick={() => setSelectedId(convo.id)}
-                className={`w-full text-left px-4 py-3.5 transition-all duration-150 relative group ${
-                  isSelected ? "bg-white/[0.07]" : "hover:bg-white/[0.04]"
-                }`}
-              >
-                {isSelected && (
-                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-8 bg-emerald-500 rounded-r" />
-                )}
-                <div className="flex items-center gap-3">
-                  {/* Avatar */}
-                  <div className="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-600 to-emerald-800 flex items-center justify-center flex-shrink-0 text-white text-xs font-semibold">
-                    {getInitials(convo.name, convo.phone)}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium text-white/90 truncate">
-                        {convo.name || convo.phone}
-                      </span>
-                      <span className="text-[10px] text-white/30 flex-shrink-0">
-                        {formatTime(convo.updated_at)}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2 mt-0.5">
-                      {convo.last_message ? (
-                        <p className="text-xs text-white/40 truncate">{convo.last_message}</p>
-                      ) : (
-                        <span />
-                      )}
-                      <span
-                        className={`text-[9px] px-1.5 py-0.5 rounded font-medium flex-shrink-0 uppercase tracking-wide ${
-                          convo.mode === "agent"
-                            ? "bg-emerald-500/20 text-emerald-400"
-                            : "bg-amber-500/20 text-amber-400"
-                        }`}
-                      >
-                        {convo.mode === "agent" ? "AI" : "You"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </button>
-            );
-          })}
         </div>
       </div>
 
@@ -241,46 +302,59 @@ export default function Dashboard() {
                 backgroundImage: "radial-gradient(circle at 20% 80%, rgba(16,185,129,0.03) 0%, transparent 50%), radial-gradient(circle at 80% 20%, rgba(16,185,129,0.02) 0%, transparent 50%)",
               }}
             >
-              {messages.map((msg, i) => {
-                const isUser = msg.role === "user";
-                const showTime = i === messages.length - 1 || messages[i + 1]?.role !== msg.role;
-                return (
-                  <div
-                    key={msg.id}
-                    className={`flex ${isUser ? "justify-start" : "justify-end"}`}
-                  >
-                    <div className={`flex flex-col ${isUser ? "items-start" : "items-end"} max-w-[65%]`}>
-                      <div
-                        className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
-                          isUser
-                            ? "bg-white/[0.07] text-white/90 rounded-tl-sm border border-white/[0.06]"
-                            : "bg-emerald-600 text-white rounded-tr-sm"
-                        }`}
-                      >
-                        <p className="whitespace-pre-wrap">{msg.content}</p>
+              {loadingMsgs ? (
+                <div className="flex items-center justify-center h-32">
+                  <div className="w-5 h-5 border-2 border-white/10 border-t-emerald-500 rounded-full animate-spin" />
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-32 gap-2">
+                  <p className="text-xs text-white/25">No messages yet</p>
+                </div>
+              ) : (
+                messages.map((msg, i) => {
+                  const isUser = msg.role === "user";
+                  const isTemp = msg.id.startsWith("temp-");
+                  const showTime = i === messages.length - 1 || messages[i + 1]?.role !== msg.role;
+                  return (
+                    <div key={msg.id} className={`flex ${isUser ? "justify-start" : "justify-end"}`}>
+                      <div className={`flex flex-col ${isUser ? "items-start" : "items-end"} max-w-[65%]`}>
+                        <div
+                          className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed transition-opacity ${
+                            isUser
+                              ? "bg-white/[0.07] text-white/90 rounded-tl-sm border border-white/[0.06]"
+                              : "bg-emerald-600 text-white rounded-tr-sm"
+                          } ${isTemp ? "opacity-60" : "opacity-100"}`}
+                        >
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
+                        </div>
+                        {showTime && (
+                          <p className="text-[10px] text-white/25 mt-1.5 px-1">
+                            {!isUser && <span className="text-emerald-500/60 mr-1">{isTemp ? "Sending…" : "Sent ·"}</span>}
+                            {!isTemp && formatTime(msg.created_at)}
+                          </p>
+                        )}
                       </div>
-                      {showTime && (
-                        <p className="text-[10px] text-white/25 mt-1.5 px-1">
-                          {!isUser && <span className="text-emerald-500/60 mr-1">AI ·</span>}
-                          {formatTime(msg.created_at)}
-                        </p>
-                      )}
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
               <div ref={messagesEndRef} />
             </div>
 
             {/* Input Bar */}
             <div className="px-6 py-4 border-t border-white/[0.06]" style={{ background: "#141414" }}>
+              {selected.mode === "human" && (
+                <p className="text-[10px] text-amber-400/70 mb-2 text-center">
+                  Human mode — your replies go directly to the customer
+                </p>
+              )}
               <div className="flex items-center gap-3 bg-white/[0.06] rounded-xl px-4 py-2.5 border border-white/[0.06] focus-within:border-emerald-500/40 transition-colors">
                 <input
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-                  placeholder="Type a message..."
+                  placeholder={selected.mode === "human" ? "Reply as yourself…" : "Send a message…"}
                   className="flex-1 bg-transparent text-sm text-white/90 placeholder:text-white/25 focus:outline-none"
                 />
                 <button
