@@ -1,15 +1,21 @@
 import OpenAI from "openai";
 import { DENTIST_SYSTEM_PROMPT } from "@/lib/system-prompt";
 
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
-});
+let _openai: OpenAI | null = null;
+function getOpenAI() {
+  if (!_openai) {
+    _openai = new OpenAI({
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: process.env.OPENROUTER_API_KEY || "placeholder",
+    });
+  }
+  return _openai;
+}
 
 export async function getAIResponse(
   messages: { role: "user" | "assistant"; content: string }[]
 ) {
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: process.env.AI_MODEL || "anthropic/claude-sonnet-4-20250514",
     messages: [
       {
