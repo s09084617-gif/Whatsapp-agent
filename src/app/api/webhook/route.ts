@@ -104,16 +104,24 @@ export async function POST(request: NextRequest) {
       .order("created_at", { ascending: true })
       .limit(20);
 
-    // Get AI response
-    const aiResponse = await getAIResponse(
-      (history || []).map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }))
-    );
+    // Get AI response with 4s timeout so Meta webhook doesn't time out
+    const aiResponse = await Promise.race([
+      getAIResponse(
+        (history || []).map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        }))
+      ),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("I'm processing your request — please hold on a moment!"), 4000)
+      ),
+    ]);
 
     // Send response via WhatsApp
-    await sendWhatsAppMessage(phone, aiResponse);
+    const sent = await sendWhatsAppMessage(phone, aiResponse);
+    if (!sent.success) {
+      console.error("WhatsApp send failed:", sent.error);
+    }
 
     // Store AI response
     await supabase.from("messages").insert({

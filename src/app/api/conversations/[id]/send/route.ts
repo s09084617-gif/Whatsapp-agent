@@ -14,7 +14,6 @@ export async function POST(
     return Response.json({ error: "Message is required" }, { status: 400 });
   }
 
-  // Get conversation to find phone number
   const { data: conversation, error: convoError } = await supabase
     .from("conversations")
     .select("phone")
@@ -25,17 +24,14 @@ export async function POST(
     return Response.json({ error: "Conversation not found" }, { status: 404 });
   }
 
-  // Send via WhatsApp
-  await sendWhatsAppMessage(conversation.phone, message);
+  const result = await sendWhatsAppMessage(conversation.phone, message.trim());
+  if (!result.success) {
+    return Response.json({ error: result.error ?? "Failed to send message" }, { status: 502 });
+  }
 
-  // Store in DB
   const { data: msg, error: msgError } = await supabase
     .from("messages")
-    .insert({
-      conversation_id: id,
-      role: "assistant",
-      content: message,
-    })
+    .insert({ conversation_id: id, role: "assistant", content: message.trim() })
     .select()
     .single();
 
@@ -43,7 +39,6 @@ export async function POST(
     return Response.json({ error: msgError.message }, { status: 500 });
   }
 
-  // Update conversation timestamp
   await supabase
     .from("conversations")
     .update({ updated_at: new Date().toISOString() })
